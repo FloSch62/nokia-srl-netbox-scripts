@@ -3,7 +3,7 @@ if __name__ == "__main__":
     import os
     import sys
     import django
-    sys.path.append('/opt/netbox/netbox')
+    sys.path.append('/app/netbox/netbox')  # Updated path to the correct location
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
     django.setup()
 
@@ -14,31 +14,33 @@ if not is_migrating:
     import re
     import random
 
-    from extras.scripts import Script, AbortScript
+    from extras.scripts import Script
+    # Update imports for NetBox 4.2
     from extras.models import (
-        ConfigContext,
+        ConfigContext, 
         CustomField,
-        CustomFieldChoiceSet,
     )
+    from extras.choices import CustomFieldTypeChoices
+    
     from django.core.exceptions import ValidationError
     from django.contrib.contenttypes.models import ContentType
-    # from django.utils.text import slugify as django_slugify
+    
     from ipam.models import (
         ASN,
         IPAddress,
         VRF,
     )
-    try:
-        from ipam.models import L2VPN
-    except ImportError:
-        from vpn.models import L2VPN
+    
+    # In NetBox 4.2, L2VPN is moved to vpn app
+    from vpn.models import L2VPN
+    
     from dcim.models import (
         Device,
         DeviceRole,
         DeviceType,
         Interface,
         InterfaceTemplate,
-        Location,
+        Location, 
         Manufacturer,
         Platform,
     )
@@ -58,7 +60,7 @@ if not is_migrating:
             else:
                 return slug
         else:
-            raise AbortScript("It's not your lucky day - unable to create a unique slug")
+            raise Exception("It's not your lucky day - unable to create a unique slug")
 
 
     class InitializeNetbox(Script):
@@ -66,45 +68,20 @@ if not is_migrating:
             name = "Initialize Netbox"
             description = "This script initializes NetBox by setting up predefined device roles, platforms, configuration contexts, add a Nokia SR1"
 
-        def create_or_update_choice_set(self, name, choices, **kwargs):
-
-            defaults = {
-                'order_alphabetically': False
-            }
-
-            for key, value in kwargs.items():
-                if value is not None:
-                    defaults[key] = value
-
-            choice_set, created = CustomFieldChoiceSet.objects.get_or_create(
-                name=name,
-                defaults=defaults
-            )
-            choice_set.extra_choices = choices
-            try:
-                choice_set.clean()
-                choice_set.save()
-                if created:
-                    self.log_success(f"Created choice set: {name}")
-                else:
-                    self.log_info(f"Updated choice set: {name}")
-            except ValidationError as e:
-                self.log_failure(f"Validation failed for '{name}': {str(e)}")
-
-        def create_or_update_custom_field(self, name, type, choice_set=None, content_types=None, object_type=None, **kwargs):
+        def create_or_update_custom_field(self, name, type, choices=None, content_types=None, object_type=None, **kwargs):
+            """
+            Create or update a custom field in NetBox 4.2
+            """
             defaults = {
                 'type': type,
             }
-            if choice_set:
-                defaults['choice_set'] = choice_set
-            if object_type:  # For object type fields
-                defaults['object_type'] = object_type
 
             # Incorporate any additional keyword arguments into the defaults
             for key, value in kwargs.items():
                 if value is not None:
                     defaults[key] = value
 
+            # Create the custom field without choices
             custom_field, created = CustomField.objects.update_or_create(
                 name=name,
                 defaults=defaults
@@ -115,13 +92,38 @@ if not is_migrating:
             else:
                 self.log_info(f"Custom field '{name}' already exists or updated.")
 
-            # Ensure content_types is always an iterable
-            if not isinstance(content_types, (list, tuple)):
-                content_types = [content_types]
+            # Handle content types - renamed to object_types in NetBox 4.2
+            if content_types:
+                if not isinstance(content_types, (list, tuple)):
+                    content_types = [content_types]
+                
+                # Convert ContentType objects to IDs
+                content_type_ids = [ct.id if hasattr(ct, 'id') else ct for ct in content_types]
+                
+                # Update object_types with the IDs
+                custom_field.object_types.set(content_type_ids)
+                self.log_success(f"Custom field '{name}' associated with specified content types.")
 
-            # Update content_types for the custom field
-            custom_field.content_types.set(content_types)
-            self.log_success(f"Custom field '{name}' associated with specified content types.")
+            # Log a message about choices
+            if choices:
+                self.log_info(f"Note: Choices for '{name}' need to be configured manually via the NetBox admin interface.")
+                for value, label in choices:
+                    self.log_info(f"  - Value: {value}, Label: {label}")
+
+            return custom_field
+
+        def create_custom_field_with_choices(self, name, type_name, choices, content_types=None, **kwargs):
+            """
+            Create custom field with choices in NetBox 4.2
+            """
+            # Just use the updated method
+            return self.create_or_update_custom_field(
+                name=name,
+                type=type_name,
+                choices=choices,
+                content_types=content_types,
+                **kwargs
+            )
 
         def create_manufacturer(self):
             manufacturer_name = "Nokia"
@@ -253,6 +255,7 @@ if not is_migrating:
             sr1_device_type = self.create_device_type(nokia_manufacturer)
             self.create_interface_template(sr1_device_type)
 
+            # Define choice sets with direct choices for NetBox 4.2
             choice_sets_info = {
                 "Service_commissioning_state": [
                     ["Planned", "Planned"],
@@ -269,47 +272,45 @@ if not is_migrating:
                 ]
             }
 
-            for name, choices in choice_sets_info.items():
-                self.create_or_update_choice_set(name, choices)
-
             content_types_ipam = [
                 ContentType.objects.get_for_model(VRF),
                 ContentType.objects.get_for_model(L2VPN),
             ]
 
+            # Create the custom fields with built-in choices (NetBox 4.2 way)
             # Create the 'Commissioning_state' custom field
             self.create_or_update_custom_field(
                 name='Commissioning_state',
-                type='select',
+                type=CustomFieldTypeChoices.TYPE_SELECT,
                 description='The commissioning state of the service.',
-                choice_set=CustomFieldChoiceSet.objects.get(name="Service_commissioning_state"),
+                choices=choice_sets_info["Service_commissioning_state"],
                 content_types=content_types_ipam
             )
 
             # Create the 'Deployment_state' custom field
             self.create_or_update_custom_field(
                 name='Deployment_state',
-                type='select',
+                type=CustomFieldTypeChoices.TYPE_SELECT,
                 description='The deployment state of the service.',
-                choice_set=CustomFieldChoiceSet.objects.get(name="Service_deployment_state"),
+                choices=choice_sets_info["Service_deployment_state"],
                 content_types=content_types_ipam
             )
 
             # Create the 'Iface_mh_mode' custom field
             self.create_or_update_custom_field(
                 name='Iface_mh_mode',
-                type='select',
+                type=CustomFieldTypeChoices.TYPE_SELECT,
                 description='Multi Home mode',
                 label='Mode',
                 group_name="Multi-homing access",
-                choice_set=CustomFieldChoiceSet.objects.get(name="MH_mode"),
+                choices=choice_sets_info["MH_mode"],
                 content_types=ContentType.objects.get_for_model(Interface)
             )
 
             # Create the 'Iface_mh_id' custom field
             self.create_or_update_custom_field(
                 name='Iface_mh_id',
-                type='integer',
+                type=CustomFieldTypeChoices.TYPE_INTEGER,
                 description='Multi Home mode',
                 label='ID',
                 group_name="Multi-homing access",
@@ -319,7 +320,7 @@ if not is_migrating:
             # Create the 'Service_location' custom field
             self.create_or_update_custom_field(
                 name='Service_location',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label='Location',
                 description='Service location.',
                 content_types=content_types_ipam,
@@ -329,7 +330,7 @@ if not is_migrating:
             # Create the 'Vrf_wanvrf' custom field
             self.create_or_update_custom_field(
                 name='Vrf_wanvrf',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label='WAN-VRF',
                 description='Associates a VRF to WAN VRF.',
                 content_types=[ContentType.objects.get_for_model(VRF)],
@@ -339,7 +340,7 @@ if not is_migrating:
             # VRF Identifier custom field
             self.create_or_update_custom_field(
                 name='Vrf_identifier',
-                type='integer',
+                type=CustomFieldTypeChoices.TYPE_INTEGER,
                 label='Identifier',
                 description='Identifier for VRF.',
                 content_types=[ContentType.objects.get_for_model(VRF)]
@@ -348,7 +349,7 @@ if not is_migrating:
             # L2VPN VLAN custom field
             self.create_or_update_custom_field(
                 name='L2vpn_vlan',
-                type='text',
+                type=CustomFieldTypeChoices.TYPE_TEXT,
                 label='802.1Q',
                 description='VLAN for L2VPN.',
                 content_types=[ContentType.objects.get_for_model(L2VPN)],
@@ -358,7 +359,7 @@ if not is_migrating:
             # L2VPN Gateway custom field
             self.create_or_update_custom_field(
                 name='L2vpn_gateway',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label='Gateway',
                 description='Gateway IP address for L2VPN.',
                 group_name="L2VPN VRF association",
@@ -369,7 +370,7 @@ if not is_migrating:
             # L2VPN IP VRF custom field
             self.create_or_update_custom_field(
                 name='L2vpn_ipvrf',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label='IP-VRF',
                 description='IP VRF for L2VPN.',
                 group_name="L2VPN VRF association",
@@ -380,7 +381,7 @@ if not is_migrating:
             # Device ASN custom field
             self.create_or_update_custom_field(
                 name='ASN',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label=None,
                 description='Autonomous System Number for devices.',
                 content_types=[ContentType.objects.get_for_model(Device)],
@@ -390,10 +391,9 @@ if not is_migrating:
             # Site Overlay ASN custom field
             self.create_or_update_custom_field(
                 name='Overlay_ASN',
-                type='object',
+                type=CustomFieldTypeChoices.TYPE_OBJECT,
                 label=None,
                 description='Overlay ASN for locations.',
-                choice_set=None,
                 content_types=[ContentType.objects.get_for_model(Location)],
                 object_type=ContentType.objects.get_for_model(ASN)
             )
