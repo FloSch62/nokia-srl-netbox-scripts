@@ -148,30 +148,12 @@ if not is_migrating:
             # Create the overlay ASN
             overlay_asn_number = yaml_data.get('overlay_asn', {}).get('number')
             if overlay_asn_number:
-                try:
-                    overlay_asn, _ = ASN.objects.get_or_create(asn=overlay_asn_number, rir=default_rir)
-                    
-                    # First check if the custom field exists and is properly configured
-                    try:
-                        # Try to get the custom field to verify it exists
-                        from extras.models import CustomField
-                        cf = CustomField.objects.get(name='Overlay_ASN')
-                        
-                        # Set the custom field data
-                        location.custom_field_data['Overlay_ASN'] = overlay_asn.id
-                        
-                        # Save with error handling
-                        try:
-                            location.save()
-                            location.refresh_from_db()
-                            self.log_success(f"Assigned Overlay ASN {overlay_asn_number} to location: {location.name}")
-                        except Exception as e:
-                            self.log_warning(f"Could not save Overlay ASN to location due to error: {str(e)}")
-                            self.log_info("Continuing with script execution despite this error")
-                    except CustomField.DoesNotExist:
-                        self.log_warning("Custom field 'Overlay_ASN' does not exist - skipping assignment")
-                except Exception as e:
-                    self.log_warning(f"Error creating or assigning Overlay ASN: {str(e)}")
+                overlay_asn, _ = ASN.objects.get_or_create(asn=overlay_asn_number, rir=default_rir)
+                # Updated for NetBox 4.2 - setting custom field data directly
+                location.custom_field_data['Overlay_ASN'] = overlay_asn.id
+                location.save()
+                location.refresh_from_db()
+                self.log_success(f"Assigned Overlay ASN {overlay_asn_number} to location: {location.name}")
             else:
                 self.log_warning("Overlay ASN number is missing in the YAML file. Skipped setting Overlay ASN for the location.")
 
@@ -184,7 +166,7 @@ if not is_migrating:
                     except DeviceRole.DoesNotExist:
                         self.log_failure(f"DeviceRole '{device_info['role_name']}' does not exist - skipping device {device_info['name']}")
                         continue
-                        
+
                     try:
                         device_type = DeviceType.objects.get(slug=device_info['type_slug'])
                     except DeviceType.DoesNotExist:
@@ -194,13 +176,13 @@ if not is_migrating:
                         if available_types:
                             self.log_info(f"Some available device types: {', '.join([dt.slug for dt in available_types])}...")
                         continue
-                        
+
                     try:
                         platform = Platform.objects.get(slug=device_info['platform_slug'])
                     except Platform.DoesNotExist:
                         self.log_failure(f"Platform '{device_info['platform_slug']}' does not exist - skipping device {device_info['name']}")
                         continue
-                    
+
                     # Create or get ASN
                     asn_number = device_info['asn_number']
                     asn, _ = ASN.objects.get_or_create(asn=asn_number, rir=default_rir)
@@ -307,7 +289,7 @@ if not is_migrating:
                             self.log_success(f"Created LAG {lag_interface.name} on device {device.name}")
                         else:
                             self.log_info(f"LAG {lag_interface.name} on device {device.name} already exists.")
-                            
+
                 except Exception as e:
                     # Catch any other unexpected errors
                     self.log_failure(f"Unexpected error processing device {device_info['name']}: {str(e)}")
