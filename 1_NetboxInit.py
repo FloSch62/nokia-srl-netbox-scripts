@@ -17,30 +17,30 @@ if not is_migrating:
     from extras.scripts import Script
     # Update imports for NetBox 4.2
     from extras.models import (
-        ConfigContext, 
+        ConfigContext,
         CustomField,
     )
     from extras.choices import CustomFieldTypeChoices
-    
+
     from django.core.exceptions import ValidationError
     from django.contrib.contenttypes.models import ContentType
-    
+
     from ipam.models import (
         ASN,
         IPAddress,
         VRF,
     )
-    
+
     # In NetBox 4.2, L2VPN is moved to vpn app
     from vpn.models import L2VPN
-    
+
     from dcim.models import (
         Device,
         DeviceRole,
         DeviceType,
         Interface,
         InterfaceTemplate,
-        Location, 
+        Location,
         Manufacturer,
         Platform,
     )
@@ -81,7 +81,7 @@ if not is_migrating:
                 if value is not None:
                     defaults[key] = value
 
-            # Create the custom field without choices
+            # Create the custom field without content_type first
             custom_field, created = CustomField.objects.update_or_create(
                 name=name,
                 defaults=defaults
@@ -96,34 +96,37 @@ if not is_migrating:
             if content_types:
                 if not isinstance(content_types, (list, tuple)):
                     content_types = [content_types]
-                
-                # Convert ContentType objects to IDs
+
+                # Convert ContentType objects to IDs if needed
                 content_type_ids = [ct.id if hasattr(ct, 'id') else ct for ct in content_types]
-                
-                # Update object_types with the IDs
+
+                # Set object_types
                 custom_field.object_types.set(content_type_ids)
                 self.log_success(f"Custom field '{name}' associated with specified content types.")
 
-            # Log a message about choices
-            if choices:
-                self.log_info(f"Note: Choices for '{name}' need to be configured manually via the NetBox admin interface.")
-                for value, label in choices:
-                    self.log_info(f"  - Value: {value}, Label: {label}")
+            # For TYPE_OBJECT fields, we need to set the content type relationship
+            if type == CustomFieldTypeChoices.TYPE_OBJECT and object_type and hasattr(custom_field, 'content_type_id'):
+                # Update content_type_id if that field exists
+                custom_field.content_type_id = object_type.id
+                custom_field.save()
+                self.log_success(f"Set content type for '{name}' to: {object_type}")
+            elif type == CustomFieldTypeChoices.TYPE_OBJECT and object_type:
+                # Try alternative approaches if content_type_id doesn't exist
+                try:
+                    # Look for the field by inspecting the model fields
+                    for field_name in dir(custom_field):
+                        if field_name.endswith('_type_id') or field_name.endswith('_content_type_id'):
+                            setattr(custom_field, field_name, object_type.id)
+                            custom_field.save()
+                            self.log_success(f"Set {field_name} for '{name}' to: {object_type}")
+                            break
+                    else:
+                        self.log_warning(f"Could not find field to set object type for '{name}'")
+
+                except Exception as e:
+                    self.log_warning(f"Failed to set object type for '{name}': {e}")
 
             return custom_field
-
-        def create_custom_field_with_choices(self, name, type_name, choices, content_types=None, **kwargs):
-            """
-            Create custom field with choices in NetBox 4.2
-            """
-            # Just use the updated method
-            return self.create_or_update_custom_field(
-                name=name,
-                type=type_name,
-                choices=choices,
-                content_types=content_types,
-                **kwargs
-            )
 
         def create_manufacturer(self):
             manufacturer_name = "Nokia"

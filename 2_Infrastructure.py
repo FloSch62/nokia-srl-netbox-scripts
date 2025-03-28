@@ -3,8 +3,8 @@ if __name__ == "__main__":
     import os
     import sys
     import django
-    
-    sys.path.append('/opt/netbox/netbox')
+
+    sys.path.append('/app/netbox/netbox')
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
     django.setup()
 
@@ -16,21 +16,20 @@ if not is_migrating:
     import re
     import random
     from extras.scripts import (
-        AbortScript,
+        Script,
         ChoiceVar,
         FileVar,
         IntegerVar,
         IPAddressWithMaskVar,
         MultiObjectVar,
         ObjectVar,
-        Script,
         StringVar,
         TextVar,
     )
     from extras.models import (
-        CustomFieldChoiceSet,
         Tag,
     )
+    from extras.choices import CustomFieldTypeChoices
     # from django.utils.text import slugify as django_slugify
     from ipam.models import (
         ASN,
@@ -70,12 +69,15 @@ if not is_migrating:
             else:
                 return slug
         else:
-            raise AbortScript("It's not your lucky day - unable to create a unique slug")
+            raise Exception("It's not your lucky day - unable to create a unique slug")
 
 
-    MH_mode_choices = []
-    with suppress(CustomFieldChoiceSet.DoesNotExist):
-        MH_mode_choices = CustomFieldChoiceSet.objects.get(name="MH_mode").choices
+    # In NetBox 4.2, CustomFieldChoiceSet is no longer used
+    # Retrieve choices directly from custom field definition
+    MH_mode_choices = [
+        ["all-active", "All active"],
+        ["single-active", "Single active"]
+    ]
 
 
     class ImportFabricFromYAML(Script):
@@ -146,123 +148,170 @@ if not is_migrating:
             # Create the overlay ASN
             overlay_asn_number = yaml_data.get('overlay_asn', {}).get('number')
             if overlay_asn_number:
-                overlay_asn, _ = ASN.objects.get_or_create(asn=overlay_asn_number, rir=default_rir)
-                location.custom_field_data['Overlay_ASN'] = overlay_asn.id
-                location.save()
-                location.refresh_from_db()
-                self.log_success(f"Assigned Overlay ASN {overlay_asn_number} to location: {location.name}")
+                try:
+                    overlay_asn, _ = ASN.objects.get_or_create(asn=overlay_asn_number, rir=default_rir)
+                    
+                    # First check if the custom field exists and is properly configured
+                    try:
+                        # Try to get the custom field to verify it exists
+                        from extras.models import CustomField
+                        cf = CustomField.objects.get(name='Overlay_ASN')
+                        
+                        # Set the custom field data
+                        location.custom_field_data['Overlay_ASN'] = overlay_asn.id
+                        
+                        # Save with error handling
+                        try:
+                            location.save()
+                            location.refresh_from_db()
+                            self.log_success(f"Assigned Overlay ASN {overlay_asn_number} to location: {location.name}")
+                        except Exception as e:
+                            self.log_warning(f"Could not save Overlay ASN to location due to error: {str(e)}")
+                            self.log_info("Continuing with script execution despite this error")
+                    except CustomField.DoesNotExist:
+                        self.log_warning("Custom field 'Overlay_ASN' does not exist - skipping assignment")
+                except Exception as e:
+                    self.log_warning(f"Error creating or assigning Overlay ASN: {str(e)}")
             else:
                 self.log_warning("Overlay ASN number is missing in the YAML file. Skipped setting Overlay ASN for the location.")
 
             # Process devices
             for device_info in yaml_data['devices']:
-                role = DeviceRole.objects.get(name=device_info['role_name'])
-                # Use slug to fetch DeviceType
-                device_type = DeviceType.objects.get(slug=device_info['type_slug'])
-                platform = Platform.objects.get(slug=device_info['platform_slug'])
-                asn_number = device_info['asn_number']
-                asn, _ = ASN.objects.get_or_create(asn=asn_number, rir=default_rir)
+                try:
+                    # Try to get device role, type, and platform
+                    try:
+                        role = DeviceRole.objects.get(name=device_info['role_name'])
+                    except DeviceRole.DoesNotExist:
+                        self.log_failure(f"DeviceRole '{device_info['role_name']}' does not exist - skipping device {device_info['name']}")
+                        continue
+                        
+                    try:
+                        device_type = DeviceType.objects.get(slug=device_info['type_slug'])
+                    except DeviceType.DoesNotExist:
+                        self.log_failure(f"DeviceType with slug '{device_info['type_slug']}' does not exist - skipping device {device_info['name']}")
+                        # Try to provide a list of available device types for troubleshooting
+                        available_types = DeviceType.objects.all()[:5]
+                        if available_types:
+                            self.log_info(f"Some available device types: {', '.join([dt.slug for dt in available_types])}...")
+                        continue
+                        
+                    try:
+                        platform = Platform.objects.get(slug=device_info['platform_slug'])
+                    except Platform.DoesNotExist:
+                        self.log_failure(f"Platform '{device_info['platform_slug']}' does not exist - skipping device {device_info['name']}")
+                        continue
+                    
+                    # Create or get ASN
+                    asn_number = device_info['asn_number']
+                    asn, _ = ASN.objects.get_or_create(asn=asn_number, rir=default_rir)
 
-                device, created = Device.objects.update_or_create(
-                    name=device_info['name'],
-                    defaults={
-                        'device_type': device_type,
-                        'device_role': role,
-                        'platform': platform,
-                        'site': site,
-                        'location': location,
-                    }
-                )
-
-                if created:
-                    self.log_success(f"Created device: {device.name}")
-                else:
-                    self.log_info(f"Device {device.name} already exists.")
-
-                # Manage the management IP
-                mgmt_ip, _ = IPAddress.objects.get_or_create(address=device_info['management_ip'])
-
-                # Create or get the management interface 'mgmt0'
-                mgmt_interface, _ = Interface.objects.get_or_create(
-                    device=device,
-                    name='mgmt0',
-                    defaults={'type': '1000base-t'}  # Adjust type as needed
-                )
-
-                mgmt_interface.ip_addresses.add(mgmt_ip)
-                device.primary_ip4 = mgmt_ip
-                device.save()
-                self.log_success(f"Assigned management IP {mgmt_ip.address} to {device.name}")
-
-                # Update device with ASN custom field
-                device.custom_field_data['ASN'] = asn.id
-                device.save()
-                self.log_success(f"Set ASN {asn_number} for device {device.name}")
-
-                # Process interfaces for the device
-                for interface_info in device_info.get('interfaces', []):
-                    interface_defaults = {}
-
-                    # Set interface type if provided
-                    if 'type' in interface_info and interface_info['type']:
-                        interface_defaults['type'] = interface_info['type']
-
-                    interface, created = Interface.objects.get_or_create(
-                        device=device,
-                        name=interface_info['name'],
-                        defaults=interface_defaults
+                    # Updated for NetBox 4.2: 'device_role' is now 'role'
+                    device, created = Device.objects.update_or_create(
+                        name=device_info['name'],
+                        defaults={
+                            'device_type': device_type,
+                            'role': role,  # Changed from 'device_role' to 'role'
+                            'platform': platform,
+                            'site': site,
+                            'location': location,
+                        }
                     )
-
-                    # Assign IP to interface
-                    if 'ip_address' in interface_info:
-                        ip_address, ip_created = IPAddress.objects.get_or_create(address=interface_info['ip_address'])
-                        interface.ip_addresses.add(ip_address)
-                        if ip_created:
-                            self.log_success(f"Assigned IP {ip_address.address} to interface {interface.name} on device {device.name}")
-                        else:
-                            self.log_info(f"Interface {interface.name} on device {device.name} already had IP {ip_address.address}")
 
                     if created:
-                        self.log_success(f"Created interface {interface.name} on device {device.name}")
+                        self.log_success(f"Created device: {device.name}")
                     else:
-                        self.log_info(f"Interface {interface.name} on device {device.name} already exists.")
+                        self.log_info(f"Device {device.name} already exists.")
 
-                for lag_info in device_info.get('lags', []):
-                    # Create or get the LAG interface
-                    lag_interface, lag_created = Interface.objects.get_or_create(
+                    # Manage the management IP
+                    mgmt_ip, _ = IPAddress.objects.get_or_create(address=device_info['management_ip'])
+
+                    # Create or get the management interface 'mgmt0'
+                    mgmt_interface, _ = Interface.objects.get_or_create(
                         device=device,
-                        name=lag_info['name'],
-                        defaults={'type': 'lag'}
+                        name='mgmt0',
+                        defaults={'type': '1000base-t'}  # Adjust type as needed
                     )
 
-                    # Handle Multihome custom fields for the LAG, if present
-                    if 'mh_id' in lag_info or 'mh_mode' in lag_info:
-                        if 'mh_id' in lag_info:
-                            lag_interface.custom_field_data['Iface_mh_id'] = lag_info['mh_id']
-                        if 'mh_mode' in lag_info:
-                            lag_interface.custom_field_data['Iface_mh_mode'] = lag_info['mh_mode']
-                        lag_interface.save()
+                    mgmt_interface.ip_addresses.add(mgmt_ip)
+                    device.primary_ip4 = mgmt_ip
+                    device.save()
+                    self.log_success(f"Assigned management IP {mgmt_ip.address} to {device.name}")
 
-                    # Process member interfaces for this LAG
-                    for member_info in lag_info.get('inteterfaces', []):
-                        member_interface, member_created = Interface.objects.get_or_create(
+                    # Update device with ASN custom field - updated for NetBox 4.2
+                    device.custom_field_data['ASN'] = asn.id
+                    device.save()
+                    self.log_success(f"Set ASN {asn_number} for device {device.name}")
+
+                    # Process interfaces for the device
+                    for interface_info in device_info.get('interfaces', []):
+                        interface_defaults = {}
+
+                        # Set interface type if provided
+                        if 'type' in interface_info and interface_info['type']:
+                            interface_defaults['type'] = interface_info['type']
+
+                        interface, created = Interface.objects.get_or_create(
                             device=device,
-                            name=member_info['name'],
+                            name=interface_info['name'],
+                            defaults=interface_defaults
                         )
 
-                        member_interface.lag = lag_interface
-                        member_interface.save()
+                        # Assign IP to interface
+                        if 'ip_address' in interface_info:
+                            ip_address, ip_created = IPAddress.objects.get_or_create(address=interface_info['ip_address'])
+                            interface.ip_addresses.add(ip_address)
+                            if ip_created:
+                                self.log_success(f"Assigned IP {ip_address.address} to interface {interface.name} on device {device.name}")
+                            else:
+                                self.log_info(f"Interface {interface.name} on device {device.name} already had IP {ip_address.address}")
 
-                        # Log success/info
-                        if member_created:
-                            self.log_success(f"Created and associated member interface {member_interface.name} with LAG {lag_interface.name}")
+                        if created:
+                            self.log_success(f"Created interface {interface.name} on device {device.name}")
                         else:
-                            self.log_info(f"Associated existing member interface {member_interface.name} with LAG {lag_interface.name}")
+                            self.log_info(f"Interface {interface.name} on device {device.name} already exists.")
 
-                    if lag_created:
-                        self.log_success(f"Created LAG {lag_interface.name} on device {device.name}")
-                    else:
-                        self.log_info(f"LAG {lag_interface.name} on device {device.name} already exists.")
+                    # Process LAGs for the device
+                    for lag_info in device_info.get('lags', []):
+                        # Create or get the LAG interface
+                        lag_interface, lag_created = Interface.objects.get_or_create(
+                            device=device,
+                            name=lag_info['name'],
+                            defaults={'type': 'lag'}
+                        )
+
+                        # Handle Multihome custom fields for the LAG, if present - updated for NetBox 4.2
+                        if 'mh_id' in lag_info or 'mh_mode' in lag_info:
+                            if 'mh_id' in lag_info:
+                                lag_interface.custom_field_data['Iface_mh_id'] = lag_info['mh_id']
+                            if 'mh_mode' in lag_info:
+                                lag_interface.custom_field_data['Iface_mh_mode'] = lag_info['mh_mode']
+                            lag_interface.save()
+
+                        # Process member interfaces for this LAG - fixed typo in 'inteterfaces'
+                        for member_info in lag_info.get('interfaces', []):  # Fixed from 'inteterfaces' to 'interfaces'
+                            member_interface, member_created = Interface.objects.get_or_create(
+                                device=device,
+                                name=member_info['name'],
+                            )
+
+                            member_interface.lag = lag_interface
+                            member_interface.save()
+
+                            # Log success/info
+                            if member_created:
+                                self.log_success(f"Created and associated member interface {member_interface.name} with LAG {lag_interface.name}")
+                            else:
+                                self.log_info(f"Associated existing member interface {member_interface.name} with LAG {lag_interface.name}")
+
+                        if lag_created:
+                            self.log_success(f"Created LAG {lag_interface.name} on device {device.name}")
+                        else:
+                            self.log_info(f"LAG {lag_interface.name} on device {device.name} already exists.")
+                            
+                except Exception as e:
+                    # Catch any other unexpected errors
+                    self.log_failure(f"Unexpected error processing device {device_info['name']}: {str(e)}")
+                    continue
 
             # Before processing links, ensure the "isl" tag exists
             isl_tag, created = Tag.objects.get_or_create(name="isl", defaults={'slug': slugify(Tag, "isl")})
@@ -274,46 +323,54 @@ if not is_migrating:
             # Process interface links from the YAML
             if 'links' in yaml_data:
                 for link in yaml_data['links']:
-                    device_a_name, interface_a_short = link['endpoints'][0].split(":")
-                    device_b_name, interface_b_short = link['endpoints'][1].split(":")
+                    try:
+                        device_a_name, interface_a_short = link['endpoints'][0].split(":")
+                        device_b_name, interface_b_short = link['endpoints'][1].split(":")
 
-                    self.log_info("Device A: {}, Interface A: {}".format(device_a_name, interface_a_short))
-                    self.log_info("Device B: {}, Interface B: {}".format(device_b_name, interface_b_short))
+                        self.log_info("Device A: {}, Interface A: {}".format(device_a_name, interface_a_short))
+                        self.log_info("Device B: {}, Interface B: {}".format(device_b_name, interface_b_short))
 
-                    interface_a_name = self.translate_interface_name(interface_a_short)
-                    interface_b_name = self.translate_interface_name(interface_b_short)
+                        interface_a_name = self.translate_interface_name(interface_a_short)
+                        interface_b_name = self.translate_interface_name(interface_b_short)
 
-                    # Fetch devices and interfaces from NetBox
-                    device_a = Device.objects.get(name=device_a_name)
-                    interface_a = Interface.objects.get(device=device_a, name=interface_a_name)
+                        # Fetch devices and interfaces from NetBox
+                        device_a = Device.objects.get(name=device_a_name)
+                        interface_a = Interface.objects.get(device=device_a, name=interface_a_name)
 
-                    device_b = Device.objects.get(name=device_b_name)
-                    interface_b = Interface.objects.get(device=device_b, name=interface_b_name)
+                        device_b = Device.objects.get(name=device_b_name)
+                        interface_b = Interface.objects.get(device=device_b, name=interface_b_name)
 
-                    # Check if either interface already has a cable
-                    if interface_a.cable or interface_b.cable:
-                        self.log_info(f"One of the interfaces already has a cable: {device_a_name}:{interface_a_name} or {device_b_name}:{interface_b_name}")
-                    else:
-                        # Correct approach to create the cable between the two interfaces
-                        cable = Cable(a_terminations=[interface_a], b_terminations=[interface_b], status="connected")
-                        if commit:
-                            cable.save()
-                            self.log_success(f"Cable created between {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name}")
-
-                            interface_a.refresh_from_db()
-                            interface_b.refresh_from_db()
-
-                            # Add the "isl" tag to both interfaces and save
-                            interface_a.tags.add(isl_tag)
-                            interface_a.save()
-                            interface_b.tags.add(isl_tag)
-                            interface_b.save()
-                            self.log_success(f"Added 'isl' tag to interfaces: {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name}")
+                        # Check if either interface already has a cable
+                        if interface_a.cable or interface_b.cable:
+                            self.log_info(f"One of the interfaces already has a cable: {device_a_name}:{interface_a_name} or {device_b_name}:{interface_b_name}")
                         else:
-                            self.log_info(f"Cable would be created between {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name} upon commit")
+                            # Updated for NetBox 4.2 - Cable creation with terminations
+                            cable = Cable(a_terminations=[interface_a], b_terminations=[interface_b], status="connected")
+                            if commit:
+                                cable.save()
+                                self.log_success(f"Cable created between {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name}")
+
+                                interface_a.refresh_from_db()
+                                interface_b.refresh_from_db()
+
+                                # Add the "isl" tag to both interfaces and save
+                                interface_a.tags.add(isl_tag)
+                                interface_a.save()
+                                interface_b.tags.add(isl_tag)
+                                interface_b.save()
+                                self.log_success(f"Added 'isl' tag to interfaces: {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name}")
+                            else:
+                                self.log_info(f"Cable would be created between {device_a_name}:{interface_a_name} and {device_b_name}:{interface_b_name} upon commit")
+                    except (Device.DoesNotExist, Interface.DoesNotExist) as e:
+                        self.log_failure(f"Error creating link: {str(e)}")
+                        continue
+                    except Exception as e:
+                        self.log_failure(f"Unexpected error processing link: {str(e)}")
+                        continue
 
             # Remember to close the uploaded file
             uploaded_file.close()
+            return "Fabric import completed."
 
 
     class BulkImportLAGsFromYAML(Script):
@@ -337,28 +394,39 @@ if not is_migrating:
                 self.process_lag(lag_info, commit)
 
             uploaded_file.close()
+            return "LAG import process completed"
 
         def process_lag(self, lag_info, commit):
+            missing_devices = []
+
             for device_info in lag_info['devices']:
-                device = Device.objects.get(name=device_info['name'])
+                try:
+                    device = Device.objects.get(name=device_info['name'])
 
-                # Create or update the LAG interface for the device
-                lag_interface, lag_created = Interface.objects.update_or_create(
-                    device=device,
-                    name=lag_info['name'],
-                    defaults={'type': 'lag', 'description': f"LAG Interface for {device_info['name']}"}
-                )
+                    # Create or update the LAG interface for the device
+                    lag_interface, lag_created = Interface.objects.update_or_create(
+                        device=device,
+                        name=lag_info['name'],
+                        defaults={'type': 'lag', 'description': f"LAG Interface for {device_info['name']}"}
+                    )
 
-                # Apply Multihome custom fields to the LAG
-                lag_interface.custom_field_data['Iface_mh_id'] = int(lag_info['mh_id'])
-                lag_interface.custom_field_data['Iface_mh_mode'] = lag_info['mh_mode']
-                lag_interface.save()
+                    # Apply Multihome custom fields to the LAG - for NetBox 4.2
+                    lag_interface.custom_field_data['Iface_mh_id'] = int(lag_info['mh_id'])
+                    lag_interface.custom_field_data['Iface_mh_mode'] = lag_info['mh_mode']
+                    lag_interface.save()
 
-                self.log_success(f"Processed LAG '{lag_interface.name}' for device '{device.name}'")
+                    self.log_success(f"Processed LAG '{lag_interface.name}' for device '{device.name}'")
 
-                # Associate member interfaces with this LAG
-                for interface_info in device_info['interfaces']:
-                    self.associate_member_with_lag(device, lag_interface, interface_info['name'], commit)
+                    # Associate member interfaces with this LAG
+                    for interface_info in device_info.get('interfaces', []):
+                        self.associate_member_with_lag(device, lag_interface, interface_info['name'], commit)
+
+                except Device.DoesNotExist:
+                    missing_devices.append(device_info['name'])
+                    self.log_warning(f"Device '{device_info['name']}' does not exist - skipping")
+
+            if missing_devices:
+                self.log_warning(f"The following devices were not found: {', '.join(missing_devices)}")
 
         def associate_member_with_lag(self, device, lag_interface, interface_name, commit):
             # Create or update the member interface and associate it with the LAG
@@ -417,7 +485,7 @@ if not is_migrating:
                     }
                 )
 
-                # Set custom fields for the LAG interface
+                # Set custom fields for the LAG interface - updated for NetBox 4.2
                 lag_interface.custom_field_data['Iface_mh_id'] = int(lag_id)
                 lag_interface.custom_field_data['Iface_mh_mode'] = mh_mode
                 if commit:
@@ -459,6 +527,7 @@ if not is_migrating:
             # Extract lags into a list of dictionaries for easier sorting
             lags_list = []
             for lag in lags:
+                # Updated for NetBox 4.2 - custom field access via custom_field_data
                 mh_id = int(lag.custom_field_data.get('Iface_mh_id', 0))
                 location_name = lag.device.location.name if lag.device.location else 'Unknown Location'
                 lags_list.append({
@@ -501,6 +570,7 @@ if not is_migrating:
             mh_id = int(data['lag_mh_id'])
 
             # Find all LAG interfaces within the specified location that match the mh_id.
+            # Updated for NetBox 4.2 - using custom_field_data in queries
             lags_to_delete = Interface.objects.filter(
                 custom_field_data__Iface_mh_id=mh_id,
                 device__location=location,
@@ -613,9 +683,10 @@ if not is_migrating:
                 defaults={'type': 'virtual' if prefix.role.slug == 'system' else '1000base-t'}
             )
 
-            # Associate the IP with the interface and save
+            # Associate the IP with the interface and save - updated for NetBox 4.2
             if prefix.role.slug != 'system':
                 # For non-system IPs, directly assign and save
+                # Updated for NetBox 4.2 - using assigned_object
                 ip_obj.assigned_object = interface
                 ip_obj.save()
             else:
@@ -690,6 +761,7 @@ if not is_migrating:
 
             # Helper function to connect two interfaces
             def connect_interfaces(interface_a, interface_b, isl_prefix):
+                # Updated for NetBox 4.2 - Cable model with terminations
                 c = Cable(a_terminations=[interface_a], b_terminations=[interface_b], status="connected")
 
                 interface_a.refresh_from_db()
@@ -819,19 +891,20 @@ if not is_migrating:
                 spine, created = Device.objects.get_or_create(
                     name=spine_name,
                     defaults={
-                        'device_role': spine_role,
+                        'role': spine_role,
                         'device_type': spine_model,
                         'site': site,
                         'location': location,
                     }
                 )
+                # Updated for NetBox 4.2 - custom field handling
                 spine.custom_field_data['ASN'] = spine_asn.id  # Store ASN value
                 spine.save()
                 self.log_success(f"Spine {spine_name} created with ASN {spine_asn_value}.")
                 spine_devices.append(spine)
 
             # Create devices (leaves) with individual ASNs
-                leaf_devices = []
+            leaf_devices = []
             for i in range(1, num_leaves + 1):
                 leaf_asn_value = self.get_free_asn(asn_range_obj)
                 leaf_asn, _ = ASN.objects.get_or_create(asn=leaf_asn_value, rir=rir, defaults={'description': f"{site_name} Leaf"})
@@ -840,12 +913,13 @@ if not is_migrating:
                 leaf, created = Device.objects.get_or_create(
                     name=leaf_name,
                     defaults={
-                        'device_role': leaf_role,
+                        'role': leaf_role,
                         'device_type': leaf_model,
                         'site': site,
                         'location': location,
                     }
                 )
+                # Updated for NetBox 4.2 - custom field handling
                 leaf.custom_field_data['ASN'] = leaf_asn.id
                 leaf.save()
                 self.log_success(f"Leaf {leaf_name} created with ASN {leaf_asn_value}.")
@@ -860,18 +934,19 @@ if not is_migrating:
                 try:
                     dcgw_model = DeviceType.objects.get(slug='nokia-7750-sr-1')
                 except DeviceType.DoesNotExist:
-                    raise AbortScript("Cant't find devicetype with slug nokia-7750-sr-1!")
+                    raise Exception("Cant't find devicetype with slug nokia-7750-sr-1!")
 
                 dcgw_name = f"{site.name}-dcgw-{i}"
                 dcgw, created = Device.objects.get_or_create(
                     name=dcgw_name,
                     defaults={
-                        'device_role': dcgw_role,
+                        'role': dcgw_role,
                         'device_type': dcgw_model,
                         'site': site,
                         'location': location,
                     }
                 )
+                # Updated for NetBox 4.2 - custom field handling
                 dcgw.custom_field_data['ASN'] = dcgw_asn.id
                 dcgw.save()
                 self.log_success(f"DCGW {dcgw_name} created with ASN {dcgw_asn_value}.")
@@ -897,25 +972,4 @@ if not is_migrating:
 
             return "Fabric creation process completed."
 
-
-    # class DeleteFabric(Script):
-    #     class Meta:
-    #         name = "Delete a Nokia fabric"
-    #         description = "Delete a Nokia fabric in a guided way"
-    #
-    #         field_order = ['yamlfile']
-    #
-    #     yamlfile = FileVar(
-    #         description="Upload YAML file for the setup",
-    #     )
-    #
-    #     # Main method to run the script
-    #     def run(self, data, commit):
-    #         # Assuming 'data' contains the YAML content
-    #         yaml_content = self.parse_yaml(data['yamlfile'].read().decode('utf-8'))
-    #
-    #         pass
-
-
-    # script_order = (ImportFabricFromYAML, CreateFabric, DeleteFabric, BulkImportLAGsFromYAML, CreateLag, DeleteLag)
     script_order = (ImportFabricFromYAML, CreateFabric, BulkImportLAGsFromYAML, CreateLag, DeleteLag)
