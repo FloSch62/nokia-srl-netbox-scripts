@@ -19,6 +19,7 @@ if not is_migrating:
     from extras.models import (
         ConfigContext,
         CustomField,
+        CustomFieldChoiceSet,
     )
     from extras.choices import CustomFieldTypeChoices
 
@@ -68,7 +69,30 @@ if not is_migrating:
             name = "Initialize Netbox"
             description = "This script initializes NetBox by setting up predefined device roles, platforms, configuration contexts, add a Nokia SR1"
 
-        def create_or_update_custom_field(self, name, type, choices=None, content_types=None, object_type=None, **kwargs):
+        def create_or_update_choice_set(self, name, choices, description=None):
+            """
+            Create or update a custom field choice set in NetBox 4.2
+            """
+            # Create the choice set
+            choice_set, created = CustomFieldChoiceSet.objects.get_or_create(
+                name=name,
+                defaults={
+                    "description": description or f"Choice set for {name}",
+                    "extra_choices": choices
+                }
+            )
+
+            # If it already exists, update the choices
+            if not created:
+                choice_set.extra_choices = choices
+                choice_set.save()
+                self.log_info(f"Updated existing choice set: {name}")
+            else:
+                self.log_success(f"Created new choice set: {name}")
+
+            return choice_set
+
+        def create_or_update_custom_field(self, name, type, choice_set=None, content_types=None, object_type=None, **kwargs):
             """
             Create or update a custom field in NetBox 4.2
             """
@@ -80,6 +104,10 @@ if not is_migrating:
             for key, value in kwargs.items():
                 if value is not None:
                     defaults[key] = value
+
+            # Set the choice_set if provided
+            if choice_set and type == CustomFieldTypeChoices.TYPE_SELECT:
+                defaults['choice_set'] = choice_set
 
             # Create the custom field without content_type first
             custom_field, created = CustomField.objects.update_or_create(
@@ -258,7 +286,7 @@ if not is_migrating:
             sr1_device_type = self.create_device_type(nokia_manufacturer)
             self.create_interface_template(sr1_device_type)
 
-            # Define choice sets with direct choices for NetBox 4.2
+            # Define choice sets with choices for NetBox 4.2
             choice_sets_info = {
                 "Service_commissioning_state": [
                     ["Planned", "Planned"],
@@ -275,18 +303,27 @@ if not is_migrating:
                 ]
             }
 
+            # First create the choice sets
+            choice_sets = {}
+            for name, choices in choice_sets_info.items():
+                choice_sets[name] = self.create_or_update_choice_set(
+                    name=name,
+                    choices=choices,
+                    description=f"Choice set for {name.replace('_', ' ')}"
+                )
+
             content_types_ipam = [
                 ContentType.objects.get_for_model(VRF),
                 ContentType.objects.get_for_model(L2VPN),
             ]
 
-            # Create the custom fields with built-in choices (NetBox 4.2 way)
+            # Create the custom fields with choice sets (NetBox 4.2 way)
             # Create the 'Commissioning_state' custom field
             self.create_or_update_custom_field(
                 name='Commissioning_state',
                 type=CustomFieldTypeChoices.TYPE_SELECT,
                 description='The commissioning state of the service.',
-                choices=choice_sets_info["Service_commissioning_state"],
+                choice_set=choice_sets["Service_commissioning_state"],
                 content_types=content_types_ipam
             )
 
@@ -295,7 +332,7 @@ if not is_migrating:
                 name='Deployment_state',
                 type=CustomFieldTypeChoices.TYPE_SELECT,
                 description='The deployment state of the service.',
-                choices=choice_sets_info["Service_deployment_state"],
+                choice_set=choice_sets["Service_deployment_state"],
                 content_types=content_types_ipam
             )
 
@@ -306,7 +343,7 @@ if not is_migrating:
                 description='Multi Home mode',
                 label='Mode',
                 group_name="Multi-homing access",
-                choices=choice_sets_info["MH_mode"],
+                choice_set=choice_sets["MH_mode"],
                 content_types=ContentType.objects.get_for_model(Interface)
             )
 
