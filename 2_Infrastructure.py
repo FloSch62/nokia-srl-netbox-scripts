@@ -832,9 +832,18 @@ if not is_migrating:
             isl_prefix_role, _ = Role.objects.get_or_create(name='ISL', slug='isl')
 
             # Create prefixes for mgmt, sysstem and isl
-            management_prefix, _ = Prefix.objects.get_or_create(prefix=management_ip_subnet, site=site, role=management_prefix_role)
-            system_prefix, _ = Prefix.objects.get_or_create(prefix=system_ip_subnet, site=site, role=system_prefix_role)
-            isl_prefix, _ = Prefix.objects.get_or_create(prefix=isl_network_subnet, site=site, role=isl_prefix_role)
+            management_prefix, _ = Prefix.objects.get_or_create(
+                prefix=str(management_ip_subnet),
+                defaults={'site': site, 'role': management_prefix_role}
+            )
+            system_prefix, _ = Prefix.objects.get_or_create(
+                prefix=str(system_ip_subnet),
+                defaults={'site': site, 'role': system_prefix_role}
+            )
+            isl_prefix, _ = Prefix.objects.get_or_create(
+                prefix=str(isl_network_subnet),
+                defaults={'site': site, 'role': isl_prefix_role}
+            )
             self.log_success("IP Subnets for Management, System, and ISL created or retrieved successfully.")
 
             # Create ASNs from user range
