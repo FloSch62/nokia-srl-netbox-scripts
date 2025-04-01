@@ -3,7 +3,8 @@ if __name__ == "__main__":
     import os
     import sys
     import django
-    sys.path.append('/opt/netbox/netbox')
+
+    sys.path.append('/app/netbox/netbox')
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'netbox.settings')
     django.setup()
 
@@ -16,7 +17,6 @@ if not is_migrating:
     import random
     import itertools
     from extras.scripts import (
-        AbortScript,
         ChoiceVar,
         FileVar,
         IntegerVar,
@@ -63,7 +63,7 @@ if not is_migrating:
             else:
                 return slug
         else:
-            raise AbortScript("It's not your lucky day - unable to create a unique slug")
+            raise Exception("It's not your lucky day - unable to create a unique slug")
 
 
     commissioning_state_choices = []
@@ -215,12 +215,16 @@ if not is_migrating:
             name = "Create L2VPN (mac-vrf)"
             description = "Create or update a single L2VPN instance based on provided inputs."
 
+        # Monkey-patch the __str__ method of Interface so that the widget shows the device name too.
+        # This change is only effective during the script's execution.
+        original_interface_str = Interface.__str__
+        Interface.__str__ = lambda self: f"{self.device.name} - {self.name}"
+
         mac_vrf_id = IntegerVar(description="MAC VRF ID")
         description = StringVar(description="Description", required=False)
         tenant = ObjectVar(model=Tenant, description="Tenant", required=False, query_params={"name__isw": "svc:"})
         location = ObjectVar(model=Location, description="Location")
-        device = ObjectVar(model=Device, description="This is a filter for the interfaces", query_params={"location": "$location"}, required=False)
-        interfaces = MultiObjectVar(model=Interface, description="Interfaces", query_params={"device_id": "$device"})
+        interfaces = MultiObjectVar(model=Interface, description="Interfaces")
         vlan = IntegerVar(description="VLAN ID, 0 for untagged", min_value=0, max_value=4095)
         route_target = StringVar(description="Route Target", required=False, regex=re.compile(r'^(?:\d+:\d+)?$'))
         ipvrf_gateway = IPAddressWithMaskVar(description="Gateway Address", required=False)
@@ -301,7 +305,6 @@ if not is_migrating:
                 self.log_success("All changes have been committed.")
 
             return "L2VPN setup complete."
-
 
     class DeleteL2VPN(Script):
         class Meta:
