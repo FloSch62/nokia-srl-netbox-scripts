@@ -634,55 +634,72 @@ if not is_migrating:
                     return asn
             raise ValueError("No free ASN available within the specified range.")
 
-        def assign_ip_address(self, device, interface_name, prefix):
+        def assign_ip_address(self, device, interface_name, prefix_obj):
             """
-            Assign an IP address from the specified prefix to the specified interface of a device,
-            based on the prefix role. For management IPs, also set the IP as the primary IP for the device.
+            Assign an IP address to the specified interface of a device, based on a prefix.
+            This version doesn't use get_available_ips() to be more robust in NetBox 4.2.
             """
-            # Generate a list of available IP addresses within the prefix
-            available_ips_list = list(prefix.get_available_ips())
+            try:
+                # Log the prefix information for debugging
+                self.log_info(f"Assigning IP from prefix: {prefix_obj}, Prefix value: {prefix_obj.prefix}")
 
-            if not available_ips_list:
-                self.log_failure(f"No available IP addresses in prefix {prefix} for {interface_name} on {device.name}.")
-                return None
+                # Extract the network prefix as a string
+                prefix_str = str(prefix_obj.prefix)
 
-            # Determine the subnet mask
-            subnet_mask = '/32' if prefix.role.slug == 'system' else f"/{prefix.prefix.prefixlen}"
-            ip_address_str = f"{available_ips_list[0]}{subnet_mask}"
+                # Parse the prefix string to get network part and mask
+                network_part, mask = prefix_str.split('/')
+                ip_octets = network_part.split('.')
 
-            ip_obj, created = IPAddress.objects.get_or_create(
-                address=ip_address_str,
-                defaults={
-                    'status': 'active',
-                    'description': f"{prefix.role.name} IP for {device.name}",
-                }
-            )
+                # Use the device ID to generate a unique last octet
+                device_id = device.id or 1
+                last_octet = (int(ip_octets[-1]) + device_id) % 254
+                if last_octet == 0:  # Avoid .0 addresses
+                    last_octet = 1
 
-            # Retrieve or create the specified interface for the device
-            interface, interface_created = Interface.objects.get_or_create(
-                device=device,
-                name=interface_name,
-                defaults={'type': 'virtual' if prefix.role.slug == 'system' else '1000base-t'}
-            )
+                ip_octets[-1] = str(last_octet)
+                ip_address = '.'.join(ip_octets)
 
-            # Associate the IP with the interface and save - updated for NetBox 4.2
-            if prefix.role.slug != 'system':
-                # For non-system IPs, directly assign and save
-                # Updated for NetBox 4.2 - using assigned_object
-                ip_obj.assigned_object = interface
-                ip_obj.save()
-            else:
-                # For system IPs, add to the interface's IP list but not set as primary IP of the device
+                # Use /32 for system IPs, otherwise use the original mask
+                if prefix_obj.role and prefix_obj.role.slug == 'system':
+                    final_mask = '32'
+                else:
+                    final_mask = mask
+
+                ip_address_str = f"{ip_address}/{final_mask}"
+
+                # Create the IP address object
+                ip_obj, created = IPAddress.objects.get_or_create(
+                    address=ip_address_str,
+                    defaults={
+                        'status': 'active',
+                        'description': f"IP for {device.name} ({prefix_obj.role.name if prefix_obj.role else 'Unknown role'})",
+                    }
+                )
+
+                # Create or get the interface
+                interface, interface_created = Interface.objects.get_or_create(
+                    device=device,
+                    name=interface_name,
+                    defaults={'type': 'virtual' if prefix_obj.role and prefix_obj.role.slug == 'system' else '1000base-t'}
+                )
+
+                # Associate the IP with the interface - for NetBox 4.2
                 interface.ip_addresses.add(ip_obj)
 
-            action = "Assigned" if created else "Reassigned"
-            self.log_success(f"{action} {ip_obj.address} to {interface_name} on {device.name}.")
+                action = "Assigned" if created else "Reused"
+                self.log_success(f"{action} IP {ip_obj.address} to {interface_name} on {device.name}")
 
-            # Specifically handle the management IP: assign to interface and set as primary
-            if prefix.role.slug == 'management':
-                device.primary_ip4 = ip_obj
-                device.save()
-                self.log_success(f"Set {ip_obj.address} as primary management IP for {device.name}.")
+                # Set as primary IP if it's a management IP
+                if prefix_obj.role and prefix_obj.role.slug == 'management':
+                    device.primary_ip4 = ip_obj
+                    device.save()
+                    self.log_success(f"Set {ip_obj.address} as primary management IP for {device.name}")
+
+                return ip_obj
+
+            except Exception as e:
+                self.log_failure(f"Error assigning IP address: {str(e)}")
+                return None
 
         def create_isl_links(self, leaves, spines, dcgws, isl_prefix):
             # Helper function to get the last available Ethernet interfaces on a device
@@ -837,24 +854,17 @@ if not is_migrating:
                 defaults={'role': management_prefix_role}
             )
 
-            management_prefix.site = site
-            management_prefix.save()
-
             system_prefix, _ = Prefix.objects.get_or_create(
                 prefix=str(system_ip_subnet),
                 defaults={'role': system_prefix_role}
             )
-
-            system_prefix.site = site
-            system_prefix.save()
 
             isl_prefix, _ = Prefix.objects.get_or_create(
                 prefix=str(isl_network_subnet),
                 defaults={'role': isl_prefix_role}
             )
 
-            isl_prefix.site = site
-            isl_prefix.save()
+            site.prefixes.add(management_prefix, system_prefix, isl_prefix)
 
             self.log_success("IP Subnets for Management, System, and ISL created or retrieved successfully.")
 
