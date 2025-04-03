@@ -430,13 +430,17 @@ if not is_migrating:
             name = "Create a MH Lag"
             description = "Create or update multihome Lag in a guided way"
 
+        # Monkey-patch the __str__ method of Interface so that the widget shows the device name too.
+        # This change is only effective during the script's execution.
+        original_interface_str = Interface.__str__
+        Interface.__str__ = lambda self: f"{self.device.name} - {self.name}"
+
         # Form fields
         lag_id = IntegerVar(description="Lag ID", min_value=1)
         mh_mode = ChoiceVar(choices=MH_mode_choices, description="Multihome Mode")
         description = StringVar(description="Description", required=False)
         location = ObjectVar(model=Location, description="Location")
-        device = ObjectVar(model=Device, description="Device", required=False, query_params={"location": "$location"})
-        interfaces = MultiObjectVar(model=Interface, description="Member Interfaces", query_params={"device_id": "$device"})
+        interfaces = MultiObjectVar(model=Interface, description="Member Interfaces", query_params={"device__location": "$location"})
 
         def run(self, data, commit):
             lag_id = str(data['lag_id'])  # Ensure lag_id is treated as string for naming consistency
