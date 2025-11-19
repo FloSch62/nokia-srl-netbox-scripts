@@ -438,14 +438,14 @@ if not is_migrating:
         # Form fields
         lag_id = IntegerVar(description="Lag ID", min_value=1)
         mh_mode = ChoiceVar(choices=MH_mode_choices, description="Multihome Mode")
-        description = StringVar(description="Description", required=False)
+        lag_description = StringVar(description="Description", required=False)
         location = ObjectVar(model=Location, description="Location")
         interfaces = MultiObjectVar(model=Interface, description="Member Interfaces", query_params={"device__location": "$location"})
 
         def run(self, data, commit):
             lag_id = str(data['lag_id'])  # Ensure lag_id is treated as string for naming consistency
             mh_mode = data['mh_mode']
-            description = data.get('description', '')
+            lag_description = data.get('lag_description', '')
             selected_interfaces = data['interfaces']
 
             # Keep track of created or updated LAGs to avoid duplicates on the same device
@@ -466,7 +466,7 @@ if not is_migrating:
                     device=device,
                     defaults={
                         'type': 'lag',
-                        'description': description,
+                        'description': lag_description,
                         # Additional LAG interface settings as needed
                     }
                 )

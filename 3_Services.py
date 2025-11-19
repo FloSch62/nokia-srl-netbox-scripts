@@ -221,7 +221,7 @@ if not is_migrating:
         Interface.__str__ = lambda self: f"{self.device.name} - {self.name}"
 
         mac_vrf_id = IntegerVar(description="MAC VRF ID")
-        description = StringVar(description="Description", required=False)
+        l2vpn_description = StringVar(description="Description", required=False)
         tenant = ObjectVar(model=Tenant, description="Tenant", required=False, query_params={"name__isw": "svc:"})
         location = ObjectVar(model=Location, description="Location")
         interfaces = MultiObjectVar(model=Interface, description="Interfaces")
@@ -232,7 +232,7 @@ if not is_migrating:
         def run(self, data, commit):
             # Extract form data
             mac_vrf_id = data['mac_vrf_id']
-            description = data.get('description', '')
+            l2vpn_description = data.get('l2vpn_description', '')
             tenant = data.get('tenant')
             location = data['location']
             interfaces = data['interfaces']
@@ -248,7 +248,12 @@ if not is_migrating:
             mac_vrf_name = f"{django_slugify(location.name)}-macvrf-{mac_vrf_id}"
 
             # Create or update L2VPN instance
-            defaults = {'slug': slugify(L2VPN, mac_vrf_name), 'type': 'vpls', 'identifier': mac_vrf_id, 'description': description}
+            defaults = {
+                'slug': slugify(L2VPN, mac_vrf_name),
+                'type': 'vpls',
+                'identifier': mac_vrf_id,
+                'description': l2vpn_description
+            }
             l2vpn, created = L2VPN.objects.get_or_create(
                 name=mac_vrf_name,
                 defaults=defaults
