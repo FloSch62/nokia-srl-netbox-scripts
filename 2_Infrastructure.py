@@ -599,12 +599,8 @@ if not is_migrating:
             name = "CreateFabric"
             description = "Automated Fabric Creation"
 
-        @staticmethod
-        def get_default_device_type(model_name):
-            return DeviceType.objects.filter(model=model_name).first()
-
-        spine_model_default = DeviceType.objects.get(slug='nokia-7220-ixr-d2l-25-100ge')
-        leaf_model_default = DeviceType.objects.get(slug='nokia-7220-ixr-d3l-32-100ge')
+        spine_model_default = DeviceType.objects.filter(slug='nokia-7220-ixr-d2l-25-100ge').first()
+        leaf_model_default = DeviceType.objects.filter(slug='nokia-7220-ixr-d3l-32-100ge').first()
 
         site_name = StringVar(description="Name of the site", default="Antwerp")
         location_name = StringVar(description="Name of the location", default="DC3")
@@ -830,6 +826,14 @@ if not is_migrating:
             system_ip_subnet = data.get('system_ip_subnet')
             isl_network_subnet = data.get('isl_network_subnet')
             asn_range = data.get('asn_range')
+
+            if not spine_model or not leaf_model:
+                missing = []
+                if not spine_model:
+                    missing.append("spine model")
+                if not leaf_model:
+                    missing.append("leaf model")
+                return f"Missing required device types: {', '.join(missing)}. Please create them in NetBox and select them when running the script."
 
             # Create or get the site, location and tenant
             site, _ = Site.objects.get_or_create(name=site_name, defaults={'slug': slugify(Site, site_name)})
